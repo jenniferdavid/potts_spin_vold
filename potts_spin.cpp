@@ -56,27 +56,30 @@
 using namespace std;
 using namespace Eigen;
 
-int nVehicles = 3;
-int nTasks = 6;
+int nVehicles = 4;
+int nTasks = 8;
 int nDim = 2*nVehicles + nTasks;
 int nComp = nDim*nDim;
 int rDim = nTasks + nVehicles;
-double kT_start = 1000;
-double kT_stop  = 0.01;
-double kT_swfac = 0.015;
-double kT_fac = exp( log(kT_swfac) / (nVehicles * nDim) ); // lower T after every neuron update
-double kT = kT_start * kT_fac;  // * to give the ini conf a own datapoint in sat plot
+double kT_start = 100;
+double kT_stop  = 0.001;
+//double kT_swfac = 0.00015;
+//double kT_fac = exp( log(kT_swfac) / (nVehicles * nDim) ); // lower T after every neuron update
+double kT = kT_start;// * kT_fac;  // * to give the ini conf a own datapoint in sat plot
+double kT_fac = 0.99;
 static const double small = 1e-15;
 static const double onemsmall = 1 - small;
 static const double lk0 = 1/small - 1; 
 double lk;
-double g = 1;
-double psi = 100;
+double g = 100;
+double psi = 1;
+double kappa;
 
 ////////////////////////////////////////////////////////////////////////////////////////
 
 Eigen::MatrixXd VMatrix = MatrixXd::Zero(nDim,nDim);
 Eigen::MatrixXd UpdatedVMatrix = MatrixXd::Zero(nDim,nDim);
+Eigen::MatrixXd NonNormUpdatedVMatrix = MatrixXd::Zero(nDim,nDim);
 Eigen::MatrixXd DeltaVMatrix = MatrixXd::Zero(nDim,nDim);
 Eigen::MatrixXd DeltaPMatrix = MatrixXd::Zero(nDim,nDim);
 
@@ -95,6 +98,8 @@ Eigen::MatrixXd dQ = MatrixXd::Zero(nDim,nDim);
 Eigen::MatrixXd E_local = MatrixXd::Zero(nDim,nDim);
 Eigen::MatrixXd E_loop = MatrixXd::Zero(nDim,nDim);
 Eigen::MatrixXd E_task = MatrixXd::Zero(nDim,nDim);
+Eigen::MatrixXd Et = MatrixXd::Zero(nDim,nDim);
+
 Eigen::MatrixXd E = MatrixXd::Zero(nDim,nDim);
 
 Eigen::MatrixXd initialE_local = MatrixXd::Zero(nDim,nDim);
@@ -118,7 +123,8 @@ Eigen::MatrixXd ivDeltaR;
 Eigen::MatrixXd ivDeltaL;
 Eigen::VectorXd sumv; 
 Eigen::VectorXd sumw; 
-
+Eigen::VectorXd sumr; 
+Eigen::VectorXd sumc;
 Eigen::VectorXd dv(nDim);
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -155,10 +161,53 @@ class neural
       VMatrix.leftCols(nVehicles) *= 0;
       VMatrix.bottomRows(nVehicles) *= 0;
       VMatrix.topRightCorner(nVehicles,nVehicles) *= 0;  
-      cout << "\n VMatrix is: \n" << VMatrix << endl;
- 
-      PMatrix = (I - VMatrix).inverse();
-      cout << "\n PMatrix is as in (I - V)^(-1): \n" << PMatrix << endl;     
+      int y = 0;
+      LABEL0:
+      sumr = VMatrix.rowwise().sum();
+      for (int i = 0; i < nDim; i++)
+                {
+                    if (sumr(i) == 0.000)
+                        { 
+                            //cout << "\n Row " << k << " is with constraints, so skipping" << endl;
+                        }
+                    else if (sumr(i) == 1.000)
+                        { 
+                            //cout << "\n Row " << k << " is already normalised" << endl;
+                        }
+                    else 
+                        {   // cout << "\n Row Normalising " << endl;
+                            for (int j = 0; j < nDim; j++)
+                            {VMatrix(i,j) = VMatrix(i,j)/sumr(i);}
+                        }
+                 }                  
+            //cout << "\n So finally, the Row Normalised UpdatedVMatrix is \n" << UpdatedVMatrix << endl;
+            //cout << "\n row sum after row normalisation is \n" << UpdatedVMatrix.rowwise().sum() << endl;
+   
+            //Normalising columns of VMatrix
+            sumc = VMatrix.colwise().sum();
+            for (int i = 0; i < nDim; i++)
+                {
+                    if (sumc(i) == 0)
+                        {//cout << "\n Col " << k << " is with constraints, so skipping" << endl;
+                        }
+                    else if (sumc(i) == 1)
+                        {//cout << "\n Col " << k << " is already normalised" << endl;
+                        }   
+                    else 
+                        {//cout << "\n Column Normalising \n" << endl;
+                            for (int j = 0; j < nDim; j++)
+                                {VMatrix(j,i) = VMatrix(j,i)/sumc(i);}
+                        }
+                 }
+        y++;
+        if (y != 200)
+            goto LABEL0;
+        else
+            cout << "\n VMatrix is: \n" << VMatrix << endl;
+            cout << "Sum of VMatrix along the row \n" << VMatrix.rowwise().sum() << endl;
+            cout << "Sum of VMatrix along the col \n" << VMatrix.colwise().sum() << endl;
+            PMatrix = (I - VMatrix).inverse();
+            cout << "\n PMatrix is as in (I - V)^(-1): \n" << PMatrix << endl;         
   }
     
   ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -181,12 +230,14 @@ class neural
             irightVec = PMatrix * (TVec + ivdVecR);
             cout << "\n irightVec is: \n" << irightVec << endl;
 
-            /*MatrixXf::Index imaxl, imaxr;
+            MatrixXf::Index imaxl, imaxr;
             double imaxleftVecInd, imaxrightVecInd;
             imaxleftVecInd = ileftVec.maxCoeff(&imaxl);
             imaxrightVecInd = irightVec.maxCoeff(&imaxr);
-            cout << "imaxl is: " << imaxl << endl;
+            /*cout << "imaxl is: " << imaxl << endl;
             cout << "imaxr is: " << imaxr << endl;*/
+            kappa = 0.5 * (ileftVec(imaxl) + irightVec(imaxr));
+            cout << "\n Kappa is: \n" << kappa << endl;
             
             cout << "\n ///////////////////////////////////////////////////////////////////// " << endl;
 
@@ -195,6 +246,7 @@ class neural
                     for (int j=0; j< nDim; j++)
                     {
                         double iX = 0; double iY = 0;
+                        
                         double isumaa = 0; double isumbb=0;
                         for (int l=rDim; l<nDim ; l++)
                         {
@@ -204,6 +256,16 @@ class neural
                         {
                             isumbb = isumbb + PMatrix(l,i);
                         }
+                        
+                        /*cout << "\n leftVec(i) is: " << leftVec(i) << endl;
+                        cout << "\n PPP(j,maxl) is: " << PPP(j,maxl) << endl;
+                        cout << "\n righttVec(j) is: " << rightVec(j) << endl;
+                        cout << "\n PPP(maxr,i) is: " << PPP(maxr,i) << endl;
+                        
+                        iX = ((ileftVec(i) + DeltaMatrix(i,j)) * PMatrix(j,imaxl));
+                        iY = ((irightVec(j) + DeltaMatrix(i,j)) * PMatrix(imaxr,i));
+                        /*cout << "\n X is: " << X << endl;
+                        cout << "\n Y is: " << Y << endl;*/
                         
                         iX = (ileftVec(i) + DeltaMatrix(i,j)) * isumaa;
                         iY = (irightVec(i) + DeltaMatrix(i,j)) * isumbb;
@@ -215,11 +277,21 @@ class neural
                             else
                                 initial_lk = lk0;  
                         initialE_loop(i,j) = initial_lk;
-                        
-                        initialE_local(i,j) = initialE_task(i,j) + initialE_loop(i,j);
                     }
                 }
                 
+                
+         initialE_task.leftCols(nVehicles) *= 10000000;
+         initialE_task.bottomRows(nVehicles) *= 10000000;
+         initialE_task.topRightCorner(nVehicles,nVehicles) *= 10000000;  //adding all the constraints for the vehicles and tasks  
+         initialE_task.topRightCorner(nVehicles,nVehicles) = initialE_task.bottomLeftCorner(nVehicles,nVehicles).eval();       
+         initialE_task.topLeftCorner(nVehicles,nVehicles) = initialE_task.bottomLeftCorner(nVehicles,nVehicles).eval();  
+         initialE_task = initialE_task/kappa;
+         initialE_loop.diagonal().array() = 10000000;
+                
+         initialE_local = (g * initialE_loop) + (psi * initialE_task);
+         E_local = initialE_local;      
+              
          cout << "\n initial E_task is: \n" << initialE_task << endl;
          cout << "\n initial E_loop is: \n" << initialE_loop << endl;
          cout << "\n initial E_local is: \n" << initialE_local << endl;
@@ -240,6 +312,8 @@ class neural
          ofstream outfile9("Elocal.txt", std::ios_base::app);
          ofstream outfile10("Eloop.txt", std::ios_base::app);
          ofstream outfile11("Etask.txt", std::ios_base::app);
+         ofstream outfile12("hist", std::ios_base::app);
+         ofstream outfile13("V", std::ios_base::app);
 
          while (FLAG != 0)
          {	
@@ -276,6 +350,16 @@ class neural
                 }          
             UpdatedVMatrix.topRightCorner(nVehicles,nVehicles) *= 0;  
             cout << "\n Updating Row VMatrix is (complete update):  \n" << UpdatedVMatrix << endl;
+            
+            outfile13 << "\n" << iteration << "\t";
+                for (int i=0; i<nDim; i++)
+                    {
+                        for (int j = 0; j <nDim; j++)
+                        {
+                           outfile13 << UpdatedVMatrix(i,j) << "\t";
+                        }
+                    }
+            
             for (int i = 0; i < nDim; i++)
                 {                    
                     for (int j = 0; j< nDim; j++)
@@ -287,6 +371,8 @@ class neural
                         }
                     }
                 }
+                
+            NonNormUpdatedVMatrix = UpdatedVMatrix;
                 
              /*else
              {
@@ -403,18 +489,18 @@ class neural
                         }
                     }
                  
-                Eigen::ArrayXXf dv(nDim,nDim);
-                for (int i=0; i<nDim; i++)
-                    {
-                        for (int j = 0; j <nDim; j++)
-                        {
-                           dv(i,j) = DeltaVMatrix(i,j); 
-                        }
-                    }
-                if ((dv < 0.005).all())
-                {   cout << "\n SOLUTIONS SATURATED. STOPPING ITERATION........" << endl;
-                    return;
-                }
+//                 Eigen::ArrayXXf dv(nDim,nDim);
+//                 for (int i=0; i<nDim; i++)
+//                     {
+//                         for (int j = 0; j <nDim; j++)
+//                         {
+//                            dv(i,j) = DeltaVMatrix(i,j); 
+//                         }
+//                     }
+//                 if ((dv < 0.005).all())
+//                 {   cout << "\n SOLUTIONS SATURATED. STOPPING ITERATION........" << endl;
+//                     return;
+//                 }
                     
                 Eigen::ColPivHouseholderQR<MatrixXd >lu_decomp(DeltaVMatrix);
                 int rank = lu_decomp.rank();
@@ -478,8 +564,6 @@ class neural
                         outfile8 << rightVec(i) << "\t";  
                     }
 
-                cout << "\n ///////////////////////////////////////////////////////////////////// " << endl;
-                    
                 //Updating the Energy 
                 for (int i = 0; i < nDim; i++)
                 {
@@ -487,10 +571,12 @@ class neural
                     {
                         double X = 0; double Y = 0;
                         double sumaa = 0; double sumbb=0;
+                        
                         for (int l=(nVehicles+nTasks); l<(nDim) ; l++)
                         {
                             sumaa = sumaa + PPP(j,l);
                         }
+                        
                         for (int l=0; l< nVehicles; l++)
                         {
                             sumbb = sumbb + PPP(l,i);
@@ -502,13 +588,21 @@ class neural
                         cout << "\n PPP(maxr,i) is: " << PPP(maxr,i) << endl;
                         X = ((leftVec(i) + DeltaMatrix(i,j)) * PPP(j,maxl));
                         Y = ((rightVec(j) + DeltaMatrix(i,j)) * PPP(maxr,i));
-                        cout << "\n X is: " << X << endl;
+                        /*cout << "\n X is: " << X << endl;
                         cout << "\n Y is: " << Y << endl;*/
                                                 
                         X = ((leftVec(i) + DeltaMatrix(i,j)) * sumaa);
                         Y = ((rightVec(j) + DeltaMatrix(i,j)) * sumbb);
                         
                         E_task(i,j) = (0.5/nVehicles)*(X + Y);
+                        
+                        
+                outfile12 << "\n" << iteration << "\t";
+                for (int i=0; i<nDim; i++)
+                    {
+                        outfile12 << sumaa << "\t";  
+                    }
+               // cout << "\n ///////////////////////////////////////////////////////////////////// " << endl;
                         
                         //Eloop calculation
                         double lk = PPP(j,i) / PPP(i,i);	
@@ -518,14 +612,34 @@ class neural
                                 lk = lk0;  
                         E_loop(i,j) = lk;
                         //E_loop(i,j) = PPP2(j,i);
-                        
-                        E_local(i,j) = (g * (E_loop(i,j))) + (psi * E_task(i,j));
-                        
                     }
                 }
+                
+                E_task.leftCols(nVehicles) *= 10000000000;
+                E_task.bottomRows(nVehicles) *= 10000000000;
+                E_task.topRightCorner(nVehicles,nVehicles) *= 10000000000;  //adding all the constraints for the vehicles and tasks  
+                E_task.topRightCorner(nVehicles,nVehicles) = E_task.bottomLeftCorner(nVehicles,nVehicles).eval();
+                E_task.topLeftCorner(nVehicles,nVehicles) = E_task.bottomLeftCorner(nVehicles,nVehicles).eval();       
+                E_loop.diagonal().array() = 1000000000000;
+
+                E_task = E_task/kappa;
+                E_local = (g * E_loop) + (psi * E_task); 
+            
                 cout << "\n E_local is: \n" << E_local << endl;
                 cout << "\n E_task is: \n" << E_task << endl;
                 cout << "\n E_loop is: \n" << E_loop << endl;
+                
+                 for (int i=0; i<nDim; i++)
+                    {
+                        for (int j = 0; j <nDim; j++)
+                            {
+                            if (E_task(i,j) > 100000)
+                                Et(i,j) = 0;
+                            else
+                                Et(i,j) = E_task(i,j);
+                            }
+                     }
+                     
                 
                 outfile11 << "\n" << iteration << "\t";
                 for (int i=0; i<nDim; i++)
@@ -541,7 +655,7 @@ class neural
                     {
                         for (int j = 0; j <nDim; j++)
                         {
-                           outfile10 << E_task(i,j) << "\t";  
+                           outfile10 << Et(i,j) << "\t";  
                         }
                     }
                 
@@ -573,25 +687,27 @@ class neural
 
 int main(int argc,char* argv[])
 {    
-    remove("E_loop.txt");
-    remove("E_local.txt");
-    remove("E_task.txt");
+    remove("Eloop.txt");
+    remove("Elocal.txt");
+    remove("Etask.txt");
     remove("VMatrix");
-    remove("V.txt");
     remove("PMatrix.txt");
     remove("DeltaVMatrix.txt");
-    remove("max.txt");
     remove("deltaMat.txt");
     remove("tauMat.txt");
     remove("tVec.txt");
-    remove("LVec.txt");
-    remove("RVec.txt");
+    remove("leftVec.txt");
+    remove("rightVec.txt");
+    remove("hist");
+    remove("V");
 
     std::ofstream outfile1 ("tVec.txt");
     std::ofstream outfile2 ("deltaMat.txt");
     std::ofstream outfile3 ("tauMat.txt");
-    
+         
     Gnuplot gp;
+    Gnuplot gp2;
+        
     neural nn;
     clock_t tStart = clock();
     //nn.readInput(); //Read the inputs - nVehicles,nTasks,DeltaMatrix,TVec from file/cmd input/generate random
@@ -619,8 +735,7 @@ int main(int argc,char* argv[])
     outfile1 << TVec << std::endl;
     outfile1.close();
     
-    /*                    
-    ifstream file2("DeltaMatrix.txt");
+    /*ifstream file2("DeltaMatrix.txt");
     if (file2.is_open())
        {
             for (int i = 0; i < nDim; i++)
@@ -632,8 +747,8 @@ int main(int argc,char* argv[])
                     }
        } 
     else
-       cout <<"file not open"<<endl;*/
-    
+       cout <<"file not open"<<endl;
+    */
     double HI = 20; // set HI and LO according to your problem.
     double LO = 1;
     double range= HI-LO;
@@ -642,10 +757,11 @@ int main(int argc,char* argv[])
     DeltaMatrix = (DeltaMatrix + MatrixXd::Constant(nDim,nDim,LO));
     
     cout << "\n DeltaMatrix is: \n" << DeltaMatrix <<endl;
-    DeltaMatrix.diagonal().array() = 0;
-    DeltaMatrix.leftCols(nVehicles) *= 0;
-    DeltaMatrix.bottomRows(nVehicles) *= 0;
-    DeltaMatrix.topRightCorner(nVehicles,nVehicles) *= 0;  //adding all the constraints for the vehicles and tasks  
+    DeltaMatrix.diagonal().array() = 10000000000;
+    DeltaMatrix.leftCols(nVehicles) *= 10000000000;
+    DeltaMatrix.bottomRows(nVehicles) *= 10000000000;
+    DeltaMatrix.topRightCorner(nVehicles,nVehicles) = DeltaMatrix.bottomLeftCorner(nVehicles,nVehicles).eval();       
+    //DeltaMatrix.row(1) += 100* DeltaMatrix.row(0);
     cout << "\n Updated DeltaMatrix is: \n" << DeltaMatrix << endl;    
     outfile2 << DeltaMatrix << std::endl;
 
@@ -655,7 +771,7 @@ int main(int argc,char* argv[])
     
     cout << "\n kT_start is "<< kT_start << endl;
     cout << "\n kT_stop is "<< kT_stop << endl;
-    cout << "\n kT_swfac is "<< kT_swfac << endl;
+    //cout << "\n kT_swfac is "<< kT_swfac << endl;
     cout << "\n kT_fac is "<< kT_fac << endl;
     cout << "\n gamma is "<< g << endl;
     cout << "\n ///////////////////////////////////////////////////////////////////// " << endl;
@@ -666,18 +782,36 @@ int main(int argc,char* argv[])
     for (int i = 0; i < nDim; i++)
         for (int j = 0; j < nDim; j++)
         {
+            if(NonNormUpdatedVMatrix(i,j) > 0.9)
+                NonNormUpdatedVMatrix(i,j) = 1;
+            else if (NonNormUpdatedVMatrix(i,j) < 0.1)
+                NonNormUpdatedVMatrix(i,j) = 0;
+            else (NonNormUpdatedVMatrix(i,j) = NonNormUpdatedVMatrix(i,j));
+        }
+    cout << "\n The final solution without normalizing V is: \n" << endl;
+    cout << NonNormUpdatedVMatrix;
+    
+       //thresholding the solution
+    for (int i = 0; i < nDim; i++)
+        for (int j = 0; j < nDim; j++)
+        {
             if(VMatrix(i,j) > 0.9)
                 VMatrix(i,j) = 1;
             else if (VMatrix(i,j) < 0.1)
                 VMatrix(i,j) = 0;
             else (VMatrix(i,j) = VMatrix(i,j));
         }
-    cout << "\n The final solution is: \n" << endl;
+    cout << "\n The final solution after V normalisation is: \n" << endl;
     cout << VMatrix;
+    
     
    gp << "N = `awk 'NR==2 {print NF}' VMatrix` \n";
    gp << "unset key \n";
    gp << "plot for [i=2:N] 'VMatrix' using 1:i with linespoints" << endl;
+   
+   gp2 << "N = `awk 'NR==2 {print NF}' V` \n";
+   gp2 << "unset key \n";
+   gp2 << "plot for [i=2:N] 'V' using 1:i with linespoints" << endl;
 
    cout << "\n Annealing done \n" << endl;
     //compare with solutions.cpp
